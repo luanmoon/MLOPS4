@@ -1,0 +1,81 @@
+# .github/workflows/cd.yml
+# CD do Lab4 adaptado para Render (no lugar do Azure Container Apps).
+# Nao precisa trocar SEU-USUARIO/SEU-REPO: a imagem usa github.repository em minusculas.
+name: CD
+
+on:
+  push:
+    tags: ['v*']          # versao nova: git push origin v1.0.1
+  workflow_dispatch:      # rollback: botao "Run workflow"
+    inputs:
+      tag:
+        description: 'Tag ja publicada no GHCR (ex.: v1.0.0)'
+        required: true
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}   # tag digitada ou tag enviada
+
+jobs:
+  # 1. Roda o ci.yml inteiro no commit da tag. No rollback, e pulado.
+  ci:
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  # 2. Constroi a imagem e publica no GHCR com a tag da versao
+  release:
+    needs: ci
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build e push com a versao
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker build --platform linux/amd64 \
+            --build-arg APP_VERSION="$TAG" \
+            -t "$IMAGE:$TAG" .
+          docker push "$IMAGE:$TAG"
+
+  # 3. Manda o Render usar a imagem da versao (espera aprovacao)
+  deploy:
+    needs: release
+    if: ${{ !failure() && !cancelled() }}   # roda tambem no rollback (release pulado)
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy no Render
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          curl -fsS -X POST \
+            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys" \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"imageUrl\": \"$IMAGE:$TAG\"}"
+
+  # 4. Testa a URL publica e confere se a versao certa esta no ar
+  verify:
+    needs: deploy
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          URL=${{ vars.APP_URL }}
+          MSG='{"nome":"cd","text":"não entendi nada"}'
+          for _ in $(seq 90); do   # ate 15 min (startup lento)
+            if curl -fsS "$URL/" | grep -q "\"$TAG\"" &&
+               curl -fsS -X POST "$URL/predictions" \
+                 -H "Content-Type: application/json" -d "$MSG"; then
+              echo "OK: $TAG no ar"; exit 0
+            fi
+            sleep 10
+          done
+          echo "Falhou: $TAG nao respondeu. Faca o rollback."; exit 1
