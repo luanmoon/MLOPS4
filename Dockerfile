@@ -20,11 +20,6 @@ COPY --chown=appuser:appuser src ./src
 
 ENV PYTHONPATH=/app
 
-# Versao gravada na imagem (o CD passa --build-arg APP_VERSION=<tag>).
-# Fica depois do pip install para nao invalidar o cache das dependencias.
-ARG APP_VERSION=dev
-ENV APP_VERSION=$APP_VERSION
-
 EXPOSE 8000
 
 CMD ["uvicorn", "src.app:app", "--host", "0.0.0.0", "--port", "8000", "--log-level","info"]
